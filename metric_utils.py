@@ -2,6 +2,54 @@ import numpy as np
 from scipy.spatial.distance import pdist, squareform
 from sklearn.metrics import r2_score
 import torch
+from IPython.core.debugger import set_trace
+
+def get_k_th_moment(k, **k_th_moment_kw):
+    def wrapper(X):
+        return k_th_moment(X, k, **k_th_moment_kw)
+    return wrapper
+
+def variance(X, μ=0):
+    
+    '''
+    X - [,T] or [1,T]
+    '''
+    
+    ndim = X.ndim
+    dim = 0 if ndim == 1 else 1 
+    
+    if μ is None:
+        μ = X.mean()
+        
+    K = (X - μ)**2 # [,T]
+    
+    # expectation
+    return K.mean()
+
+
+
+def k_th_moment(X, k, μ=0, σ=None):
+    
+    '''
+    X - [,T] or [1,T]
+    '''
+    ndim = X.ndim
+    dim = 0 if ndim == 1 else 1 
+#     set_trace()
+    if μ is None:
+        μ = X.mean()
+    if σ is None: 
+        σ = X.std()
+        
+    K = (X - μ)**k / (σ**k) # [,T]
+    
+    # expectation
+    return K.mean()
+
+
+
+def cosine_sim(x,y):
+    return x@y / (np.linalg.norm(x)*np.linalg.norm(y))
 
 def get_pred_index(metric, index):
     def wrapper(Y_pred, Y_true):
@@ -32,8 +80,6 @@ def l2_loss(Y_pred, Y_true):
     Y_true - [d,T]
     '''
     return torch.pow(torch.norm(Y_pred - Y_true, dim=0), 2).mean()
-
-
 
 
 

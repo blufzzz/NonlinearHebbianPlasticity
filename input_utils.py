@@ -1,17 +1,19 @@
 import numpy as np
 from scipy.signal import  convolve
 from scipy.signal.windows import blackman, gaussian
+from scipy.spatial.transform import Rotation as R
+
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import torch
 from IPython.core.debugger import set_trace
 
 
-def make_kurtosis_bicluster(n_samples, n_clusters=2, corr=0.99):
+def make_kurtosis_bicluster(n_samples, distance=1, n_clusters=2, corr=0.99, angle=np.pi/4, random_state=42):
     
- 
+    dy = dx = np.sqrt(distance)
     means = np.array([[0,0], 
-                      [-1,1]])
+                      [-dx,dy]])
     
     cov = np.array([
                     [[1,corr],
@@ -20,6 +22,7 @@ def make_kurtosis_bicluster(n_samples, n_clusters=2, corr=0.99):
                      [corr,1]]
                    ])
     
+    
     N_0 = n_samples//2
     N_1 = n_samples - n_samples//2
     mv_0 = np.random.multivariate_normal(means[0], cov[0], size=N_0)
@@ -27,10 +30,12 @@ def make_kurtosis_bicluster(n_samples, n_clusters=2, corr=0.99):
 
     I = np.concatenate([mv_0, mv_1]).T
     theta = np.concatenate([np.zeros(N_0), np.ones(N_1)])
-    randind = np.arange(n_samples)
-    np.random.shuffle(randind)
-    I = I[:,randind]
-    theta = theta[randind]
+    
+    # rotation angles
+    U = np.array([[np.cos(angle), np.sin(angle)],
+                  [-np.sin(angle), np.cos(angle)]])
+
+    I = U@I
     
     return I.T, theta
 
@@ -80,11 +85,23 @@ def create_data(**kwargs):
     gen_params = kwargs['generator_kwargs']
     unsupervised = kwargs['unsupervised']
     scaler = kwargs['scaler']
+    whiten = kwargs['whiten']
+    
     
     inpt, outpt = gen(**gen_params)
+    
+    T,d = inpt.shape
+    assert T > d
+    
     inpt -= inpt.mean(0, keepdims=True)
     if scaler is not None:
         inpt = scaler.fit_transform(inpt)
+    if whiten:
+        # project on 
+        inpt = PCA(whiten=True, random_state=42).fit_transform(inpt)
+        # assert identity covariance
+        assert np.isclose((inpt.T @ inpt) / inpt.shape[0], np.eye(d), atol=1e-1).all()
+        
     inpt = inpt.T # to obtrain [d,N]
     
     if unsupervised:

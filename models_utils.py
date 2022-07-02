@@ -2,7 +2,12 @@ import torch
 from torch import nn
 from IPython.core.debugger import set_trace
 
-class J_criterion:
+def init_weights(self):
+    for p in self.parameters():
+        nn.init.xavier_normal_(p)
+
+
+class dJ_criterion:
     
     '''
     example
@@ -11,20 +16,30 @@ class J_criterion:
     J_θ(X) -> Y
     '''
     
-    def __init__(self, J_s):
+    def __init__(self, J_s, reduce='mean'):
         
         # list of differentiable scalar functions: J:R^T -> R
         self.J_s = J_s 
         self.dim = len(J_s)
+        self.reduce=reduce
         
     def __call__(self, X):
+        
         # X - [d,T]
+        d,T = X.shape
         output = []
-#         X.requires_grad_(True)
+        if self.reduce=='mean':
+            mult = T
+        elif self.reduce=='sum':
+            mult = 1
+        else:
+            raise RuntimeError('Wrong self.reduce type!')
+            
         assert len(X) == self.dim
-        for i,X_i in enumerate(X):
-            X_i = X_i.clone().detach().requires_grad_(True)
-            y = self.J_s[i](X_i)
+        for i in range(d):
+            X_i = X[i].clone().detach().requires_grad_(True)
+            y = self.J_s[i](X_i)*mult
+            
             output.append(torch.autograd.grad(y, 
                                               X_i, 
                                               retain_graph=True, 
@@ -34,9 +49,33 @@ class J_criterion:
         return torch.stack(output, dim=0)
 
 
-def init_weights(self):
-    for p in self.parameters():
-        nn.init.xavier_normal_(p)
+
+
+
+class gained_function(nn.Module):
+    
+    def __init__(self, input_dim, function):
+        
+        super().__init__()
+        
+        # nonlinearity
+        self.function = function
+        self.input_dim = input_dim
+        
+        self.theta = nn.Parameter(torch.zeros(self.input_dim, requires_grad=True))
+        
+        init_weights(self)
+
+    def forward(self, x):
+        
+        '''
+        x - [d,T]
+        '''
+        
+        x = self.gained_functions(x*self.theta.unsqueeze(1))
+        
+        return x
+    
 
 class universal_approximator(nn.Module):
     

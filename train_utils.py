@@ -9,6 +9,79 @@ from IPython.core.debugger import set_trace
 from input_utils import *
 from metric_utils import *
 
+'''
+inp - [d1,T], layer input 
+out - [d2,T], layer output
+W - [d2, d1]
+|--------|
+|--w(i)--|
+|--------|
+|--------|
+'''
+        
+def oja_rule(inp, out, W):
+    d1,T = inp.shape
+    # equation (4) for quadratic error
+    # minimizes quadratic representation error $J(W) = ||X - W^Tf(WX)||_2$
+    dW = out@(inp.T - out.T@W)/T # [d2,:]@([:,d1] - [:,d2]@[d2,d1]) 
+    return dW
+
+def hebb_rule(inp, out, W, weight_decay=1e-1):
+    d1,T = inp.shape
+    dW = (out@inp.T)/T - weight_decay*W
+    return dW
+
+def criterion_rule(inp, out, W):
+    # equation (3)
+    if isinstance(inp, torch.Tensor):
+        d1,T = inp.shape
+        device = W.device
+        I = torch.eye(d1, device=device) 
+    else:
+        d1,T = inp.shape
+        I = np.eye(d1) 
+        
+    dW = (out@inp.T)@(I - W.T@W)/T # [d2,:]@[:,d1]@([d1,d1] - [d1,d1]) 
+    return dW
+
+def GHA_rule(inp, out, W):
+    d1,T = inp.shape
+    i_u, j_u = np.triu_indices(d2, k=1)
+    L_out = out@out.T
+    L_out[i_u, j_u] = 0
+    dW = (out@inp.T - (L_out @ W))/T # [d2,:]@([:,d1] - [d2,d2]@[d2,d1])
+    return dW
+
+
+def bruteforce_projection(n_grid_samples, criterion, X, w_min=-1.5, w_max=1.5):
+    
+    '''
+    Maximizing projection criterion, by bruteforce
+    X - [d,T]
+    '''
+    
+    W_grid = np.stack(np.meshgrid(np.linspace(w_min, w_max, n_grid_samples), 
+                                  np.linspace(w_min, w_max, n_grid_samples), indexing='ij'), -1)
+    
+    W_grid /= np.linalg.norm(W_grid, axis=-1, keepdims=True)
+
+    crit_map = np.empty((n_grid_samples, n_grid_samples))
+    for i in range(n_grid_samples):
+        for j in range(n_grid_samples):
+            w = W_grid[i,j]
+            s = w@X
+            crit = criterion(s)
+            crit_map[i,j] = crit
+            
+    return crit_map, W_grid
+
+
+
+def check_nan(*args):
+    for arg in args:
+        if torch.isnan(arg).any():
+            return True
+
 
 def train(network, 
           opt, 
@@ -35,6 +108,7 @@ def train(network,
     else:
         val_metrics = None
     
+    # val data
     input_torch_val = val_data['inpt']
     output_torch_val = val_data['outpt']
     
@@ -43,6 +117,7 @@ def train(network,
     
     iterator = tqdm(range(TP.epochs)) if TP.progress_bar else range(TP.epochs)
     
+    # iterate over epoches
     for i in iterator:
 
         # train
@@ -56,19 +131,30 @@ def train(network,
         output_torch = torch.tensor(data_output[:,random_indexes], dtype=torch.float).to(TP.device)
 
         T = input_torch.shape[1]
+        criterion_train_list = []
         for t in range(0,T,TP.batch_size):
             with autograd_context_train():
 
-                # train
                 network.train()
-                output_pred = network.forward(input_torch[:,t:t+TP.batch_size])
-                loss = criterion(output_pred[-1], output_torch[:,t:t+TP.batch_size])
-                metric_dict['loss_train'].append(loss.item())
-                metric_dict['outpt_train'] = output_pred
                 
+                # create batches
+                input_torch_batch = input_torch[:,t:t+TP.batch_size]
+                output_torch_batch = output_torch[:,t:t+TP.batch_size]
+                
+                # common call for all models
+                output_pred = network.forward(input_torch_batch)
+                if check_nan(*output_pred):
+                    set_trace()
+                
+                criterion_train = criterion(output_pred[-1], output_torch_batch)
+                criterion_train_list.append(criterion_train.item())
+                
+                ##################
+                # WEIGHTS UPDATE #
+                ##################
                 if TP.learning_type=='BP':
                     opt.zero_grad()
-                    loss.backward()
+                    criterion_train.backward()
                     
                     if TP.calculate_grad:
                         metric_dict['grad_norm'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
@@ -87,29 +173,34 @@ def train(network,
                     
                 if TP.weight_saver is not None:
                      metric_dict['weight'].append(TP.weight_saver(network))
-
+        
         # validation
         with autograd_context_val():
             
             network.eval()
             output_pred_val = network.forward(input_torch_val)
-            loss_val = criterion(output_pred_val[-1], output_torch_val)
-            metric_dict['loss_val'].append(loss_val.item())
+            criterion_val = criterion(output_pred_val[-1], output_torch_val)
+            metric_dict['criterion_val'].append(criterion_val.item())
             metric_dict['outpt_val'] = output_pred_val
+            metric_dict['criterion_train'].append(np.mean(criterion_train_list))
             
             # calculate val metrics
             if val_metrics is not None:
                 for val_metric_name, val_metric in val_metrics.items():
                     v = val_metric(output_pred_val, output_torch_val)
                     metric_dict[val_metric_name + '_val'].append(v.item())
-            
-            if hasattr(TP, 'stopping_criterion'):
+                    
+            if hasattr(TP, 'stopping_criterion') and TP.stopping_criterion is not None:
                 stopping_criterion_val = TP.stopping_criterion(output_pred_val, output_torch_val)
+        
+                # early stopping
+                assert stopping_criterion_val > -1e-5, '`stopping_criterion_val` must be positive!'
+                if stopping_criterion_val < TP.tol:
+                    break
             else:
-                stopping_criterion_val = loss_val.item()
-            
-        if stopping_criterion_val < TP.tol:
-            break
+                # no stopping criteria, continue training
+                continue
+                
         
     return network, opt, metric_dict
     
