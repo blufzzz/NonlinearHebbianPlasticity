@@ -9,7 +9,51 @@ import torch
 from IPython.core.debugger import set_trace
 
 
-def make_kurtosis_bicluster(n_samples, distance=1, n_clusters=2, corr=0.99, angle=np.pi/4, random_state=42):
+def make_kurtosis_first_direction(n_samples, dim=2, ktype='pos', offset=None, replace_ratio=0.25):
+    
+    X = np.random.randn(dim, n_samples)
+    Y = X[0]
+    
+    if ktype == 'pos':
+        assert replace_ratio <= 0.5
+        replace_number = int(n_samples*replace_ratio)
+        rand_subsample = np.random.choice(np.arange(n_samples), size=replace_number, replace=False)
+        Y[rand_subsample] = (np.random.random_sample(replace_number) - 0.5)*0.25
+        
+    elif ktype=='neg':
+        if offset is None:
+            offset = 1 + np.random.random_sample()
+        rand_subsample = np.random.choice([True,False], size=n_samples, replace=True)
+        Y[rand_subsample] += offset
+        Y[~rand_subsample] -= offset
+    
+    else:
+        raise RuntimeError('Wrong `stype`, only pos and neg are supported')
+    
+    return X.T, np.zeros((n_samples,))
+
+
+    
+def make_skewness_first_direction(n_samples, dim=2, stype='pos', k=None):
+    
+    X = np.random.randn(dim, n_samples)
+    Y = X[0]
+    
+    if k is None:
+        k = 1+np.random.random_sample()
+    
+    if stype == 'pos':
+        Y[Y>0] = Y[Y>0]*k
+    elif stype=='neg':
+        Y[Y<0] = Y[Y<0]*k
+    else:
+        raise RuntimeError('Wrong `stype`, only pos and neg are supported')
+    
+    return X.T, np.zeros((n_samples,))
+
+
+
+def make_bicluster(n_samples, distance=1, n_clusters=2, corr=0.99, angle=np.pi/4, random_state=42):
     
     dy = dx = np.sqrt(distance)
     means = np.array([[0,0], 
@@ -60,7 +104,6 @@ def make_random_affine(n_samples, cov, W, noise=1e-1, random_state=42):
     return X, theta
 
 
-
 def generate_random_tiling(N_I, T, receptive_field_dt):
     
     I = np.zeros((N_I,T))
@@ -77,43 +120,73 @@ def generate_random_tiling(N_I, T, receptive_field_dt):
     return I
 
 
-def create_data(**kwargs):
-    '''
-    generator output should be (X, y) or (X, None) tuple!
-    '''
-    gen = kwargs['generator']
-    gen_params = kwargs['generator_kwargs']
-    unsupervised = kwargs['unsupervised']
-    scaler = kwargs['scaler']
-    whiten = kwargs['whiten']
+def whiten(X):
+
+    T,d = X.shape
+    C = X.T@X / (T-1) # [d,d]
+    w,v = np.linalg.eig(C)
+    w_argsort = np.argsort(w)[::-1]
+    w = np.sqrt(w[w_argsort])
+    v = v[:,w_argsort]
+    X_ = X@v / w[None,:]
     
+    return X_
+
+class DataGenerator:
     
-    inpt, outpt = gen(**gen_params)
-    
-    T,d = inpt.shape
-    assert T > d
-    
-    inpt -= inpt.mean(0, keepdims=True)
-    if scaler is not None:
-        inpt = scaler.fit_transform(inpt)
-    if whiten:
-        # project on 
-        inpt = PCA(whiten=True, random_state=42).fit_transform(inpt)
-        # assert identity covariance
-        assert np.isclose((inpt.T @ inpt) / inpt.shape[0], np.eye(d), atol=1e-1).all()
+    def __init__(self, **kwargs):
         
-    inpt = inpt.T # to obtrain [d,N]
-    
-    if unsupervised:
-        # use encoding-decoding paradigm
-        outpt = inpt.copy()
-    else:
-        # use regression
-        outpt -= np.mean(outpt) # outpt - [N,]
-        outpt = MinMaxScaler((-1,1)).fit_transform(outpt[:,None]).flatten() # outpt - [N,]
-        outpt = outpt[None,:] # outpt - [1,N]
+        '''
+        generator output should be (X, y) or (X, None) tuple!
+        '''
         
-    return inpt, outpt
+        # defaults
+        self.normalization = False
+        self.normalize_output = False
+        self.whitening = False
+        self.pca_whitener = None
+        self.use_outpt_color = False
+        
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        
+    def __call__(self):
+        
+        color = None
+        inpt, outpt = self.generator(**self.generator_kwargs)
+        
+        if self.use_outpt_color:
+            color = MinMaxScaler((-1,1)).fit_transform(outpt[:,None]).flatten()
+
+        T,d = inpt.shape
+        assert T > d
+
+        if self.scaler is not None:
+            inpt = self.scaler.fit_transform(inpt)
+            
+        if self.whitening:
+            if self.pca_whitener is None:
+                self.pca_whitener = PCA(whiten=True, random_state=42)
+                self.pca_whitener.fit_transform(inpt)
+            else:
+                inpt = pca_whitener.transform(inpt)
+            # assert identity covariance
+            assert np.isclose((inpt.T @ inpt) / inpt.shape[0], np.eye(d), atol=1e-1).all()
+
+        inpt = inpt.T # to obtrain [d,N]
+
+        if self.unsupervised:
+            # use encoding-decoding paradigm
+            outpt = inpt.copy()
+        else:
+            if self.normalize_output:
+                # use regression
+                outpt -= np.mean(outpt) # outpt - [N,]
+                outpt = MinMaxScaler((-1,1)).fit_transform(outpt[:,None]).flatten() # outpt - [N,]
+                
+            outpt = outpt[None,:] # outpt - [1,N]
+            
+        return inpt, outpt, color
 
 def create_data_tiling(**kwargs):
     

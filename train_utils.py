@@ -18,6 +18,18 @@ W - [d2, d1]
 |--------|
 |--------|
 '''
+
+def NonlinearGHA(inp, out, W):
+    raise NotImplementedError()
+#             dW = torch.zeros_like(W)
+#             errs = torch.zeros_like(W)
+#             errs[0] = inp
+#             for i in range(d2):
+#                 y_i = w_i @ n
+#                 f_i = f(y_i)
+#                 g_i = torch.autograd.grad(f_i, y_i)
+#                 w_i = W[i]
+#                 dW[i] = 
         
 def oja_rule(inp, out, W):
     d1,T = inp.shape
@@ -26,7 +38,7 @@ def oja_rule(inp, out, W):
     dW = out@(inp.T - out.T@W)/T # [d2,:]@([:,d1] - [:,d2]@[d2,d1]) 
     return dW
 
-def hebb_rule(inp, out, W, weight_decay=1e-1):
+def hebb_rule(inp, out, W, weight_decay=0):
     d1,T = inp.shape
     dW = (out@inp.T)/T - weight_decay*W
     return dW
@@ -39,7 +51,7 @@ def criterion_rule(inp, out, W):
         I = torch.eye(d1, device=device) 
     else:
         d1,T = inp.shape
-        I = np.eye(d1) 
+        I = np.eye(d1) # [d1,d1]
         
     dW = (out@inp.T)@(I - W.T@W)/T # [d2,:]@[:,d1]@([d1,d1] - [d1,d1]) 
     return dW
@@ -53,7 +65,7 @@ def GHA_rule(inp, out, W):
     return dW
 
 
-def bruteforce_projection(n_grid_samples, criterion, X, w_min=-1.5, w_max=1.5):
+def bruteforce_projection(n_grid_samples, criterion, X, f=None, w_min=-1.5, w_max=1.5):
     
     '''
     Maximizing projection criterion, by bruteforce
@@ -69,7 +81,12 @@ def bruteforce_projection(n_grid_samples, criterion, X, w_min=-1.5, w_max=1.5):
     for i in range(n_grid_samples):
         for j in range(n_grid_samples):
             w = W_grid[i,j]
-            s = w@X
+            
+            if f is not None:
+                s = f(w@X)
+            else:
+                s = w@X
+                
             crit = criterion(s)
             crit_map[i,j] = crit
             
@@ -87,15 +104,22 @@ def train(network,
           opt, 
           criterion,
           train_params,
-          data_params,
+          gata_generator,
           val_data,
+          criterion_kwargs=None,
           metric_dict=None
           ):
+    
+    TP = train_params
 
     if metric_dict is None:
         metric_dict = defaultdict(list)
         
-    TP = train_params
+    if hasattr(TP, 'val_metrics'):
+        val_metrics = TP.val_metrics
+    else:
+        val_metrics = None
+        
     
     enable_grad_train = TP.enable_grad_train if hasattr(TP, 'enable_grad_train') else False
     enable_grad_val = TP.enable_grad_val if hasattr(TP, 'enable_grad_val') else False
@@ -103,17 +127,10 @@ def train(network,
     autograd_context_train = torch.autograd.enable_grad if enable_grad_train else torch.autograd.no_grad
     autograd_context_val = torch.autograd.enable_grad if enable_grad_val else torch.autograd.no_grad
     
-    if hasattr(TP, 'val_metrics'):
-        val_metrics = TP.val_metrics
-    else:
-        val_metrics = None
     
     # val data
     input_torch_val = val_data['inpt']
     output_torch_val = val_data['outpt']
-    
-    if metric_dict is None:
-        metric_dict = defaultdict(list)
     
     iterator = tqdm(range(TP.epochs)) if TP.progress_bar else range(TP.epochs)
     
@@ -122,7 +139,7 @@ def train(network,
 
         # train
         network.train()
-        data_input, data_output = create_data(**data_params) # ([d_input,T], [d_output,T])
+        data_input, data_output, _ = gata_generator() # ([d_input,T], [d_output,T])
         random_indexes = np.arange(data_input.shape[1]) # shuffle over time
         if TP.shuffle:
             np.random.shuffle(random_indexes)
@@ -146,7 +163,12 @@ def train(network,
                 if check_nan(*output_pred):
                     set_trace()
                 
-                criterion_train = criterion(output_pred[-1], output_torch_batch)
+#                 set_trace()
+                
+                criterion_train = criterion(output_pred[-1], 
+                                            output_torch_batch,
+                                            **criterion_kwargs['train'])
+                
                 criterion_train_list.append(criterion_train.item())
                 
                 ##################
@@ -163,6 +185,7 @@ def train(network,
                     if TP.clip_grad_value is not None:
                         nn.utils.clip_grad_norm_(network.parameters(), TP.clip_grad_value)
                     opt.step()
+                    
                 else:
                     network.hebbian_learning_step(input_torch[:,t:t+TP.batch_size], 
                                                   output_pred, # list of layer activations
@@ -174,15 +197,25 @@ def train(network,
                 if TP.weight_saver is not None:
                      metric_dict['weight'].append(TP.weight_saver(network))
         
+        # end of epoch
+        ######################################################################################
+        
+        metric_dict['criterion_train'].append(np.mean(criterion_train_list))
+        
+        
         # validation
         with autograd_context_val():
             
             network.eval()
             output_pred_val = network.forward(input_torch_val)
-            criterion_val = criterion(output_pred_val[-1], output_torch_val)
+            
+            criterion_val = criterion(output_pred_val[-1], 
+                                      output_torch_val,
+                                      **criterion_kwargs['val'])
+            
             metric_dict['criterion_val'].append(criterion_val.item())
             metric_dict['outpt_val'] = output_pred_val
-            metric_dict['criterion_train'].append(np.mean(criterion_train_list))
+            
             
             # calculate val metrics
             if val_metrics is not None:

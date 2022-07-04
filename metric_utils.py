@@ -4,6 +4,7 @@ from sklearn.metrics import r2_score
 import torch
 from IPython.core.debugger import set_trace
 
+
 def get_k_th_moment(k, **k_th_moment_kw):
     def wrapper(X):
         return k_th_moment(X, k, **k_th_moment_kw)
@@ -82,15 +83,15 @@ def l2_loss(Y_pred, Y_true):
     return torch.pow(torch.norm(Y_pred - Y_true, dim=0), 2).mean()
 
 
-
-def strain(Y_pred, Y_true):
+def strain(X, Z):
     
     '''
-    Y_pred - [d,T]
-    Y_true - [d,T]
+    X - [d1,T]
+    Z - [d2,T]
+    d2 < d1
     '''
     
-    return ((Y_pred.T@Y_pred - Y_true.T@Y_true)**2).mean()
+    return ((Z.T@Z - X.T@X)**2).mean()
 
 
 
