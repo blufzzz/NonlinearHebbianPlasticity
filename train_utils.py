@@ -127,7 +127,6 @@ def train(network,
     autograd_context_train = torch.autograd.enable_grad if enable_grad_train else torch.autograd.no_grad
     autograd_context_val = torch.autograd.enable_grad if enable_grad_val else torch.autograd.no_grad
     
-    
     # val data
     input_torch_val = val_data['inpt']
     output_torch_val = val_data['outpt']
@@ -146,9 +145,17 @@ def train(network,
         
         input_torch = torch.tensor(data_input[:,random_indexes], dtype=torch.float).to(TP.device)
         output_torch = torch.tensor(data_output[:,random_indexes], dtype=torch.float).to(TP.device)
-
+        
+        # create distriution for T
+        if 'P' in criterion_kwargs['train']: 
+            P_train = compute_joint_probabilities(data_input.T, 
+                                                 perplexity=criterion_kwargs['train']['perplexity'],
+                                                 verbose=0)
+        
+        
         T = input_torch.shape[1]
         criterion_train_list = []
+        # iterate over batches
         for t in range(0,T,TP.batch_size):
             with autograd_context_train():
 
@@ -158,18 +165,20 @@ def train(network,
                 input_torch_batch = input_torch[:,t:t+TP.batch_size]
                 output_torch_batch = output_torch[:,t:t+TP.batch_size]
                 
+                if 'P' in criterion_kwargs['train']: 
+                    criterion_kwargs['train']['P'] = P_train[t:t+TP.batch_size,:][:,t:t+TP.batch_size]
+                
                 # common call for all models
                 output_pred = network.forward(input_torch_batch)
                 if check_nan(*output_pred):
                     set_trace()
                 
-#                 set_trace()
+                if not criterion_kwargs['skip_train']:
+                    criterion_train = criterion(output_pred[-1], 
+                                                output_torch_batch,
+                                                **criterion_kwargs['train'])
                 
-                criterion_train = criterion(output_pred[-1], 
-                                            output_torch_batch,
-                                            **criterion_kwargs['train'])
-                
-                criterion_train_list.append(criterion_train.item())
+                    criterion_train_list.append(criterion_train.item())
                 
                 ##################
                 # WEIGHTS UPDATE #
@@ -200,7 +209,8 @@ def train(network,
         # end of epoch
         ######################################################################################
         
-        metric_dict['criterion_train'].append(np.mean(criterion_train_list))
+        if not criterion_kwargs['skip_train']:
+            metric_dict['criterion_train'].append(np.mean(criterion_train_list))
         
         
         # validation
@@ -209,12 +219,13 @@ def train(network,
             network.eval()
             output_pred_val = network.forward(input_torch_val)
             
-            criterion_val = criterion(output_pred_val[-1], 
-                                      output_torch_val,
-                                      **criterion_kwargs['val'])
-            
-            metric_dict['criterion_val'].append(criterion_val.item())
-            metric_dict['outpt_val'] = output_pred_val
+            if not criterion_kwargs['skip_val']:
+                criterion_val = criterion(output_pred_val[-1], 
+                                          output_torch_val,
+                                          **criterion_kwargs['val'])
+
+                metric_dict['criterion_val'].append(criterion_val.item())
+                metric_dict['outpt_val'] = output_pred_val
             
             
             # calculate val metrics

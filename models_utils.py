@@ -57,15 +57,20 @@ class dJ_criterion:
 
 class gained_function(nn.Module):
     
-    def __init__(self, input_dim, function):
+    def __init__(self, input_dim, function, bias=True):
         
         super().__init__()
         
         # nonlinearity
         self.function = function
+        self.bias = bias
         self.input_dim = input_dim
         
-        self.theta = nn.Parameter(torch.zeros(self.input_dim, requires_grad=True))
+        self.theta = nn.Parameter(torch.zeros(self.input_dim, 1, requires_grad=True))
+        if self.bias:
+            self.theta_bias = nn.Parameter(torch.zeros(self.input_dim, 1, requires_grad=True))
+        else:
+            self.theta_bias = 0.
         
         init_weights(self)
 
@@ -75,7 +80,7 @@ class gained_function(nn.Module):
         x - [d,T]
         '''
         
-        x = self.function(x*self.theta.unsqueeze(1))
+        x = self.function(x*self.theta + self.theta_bias)
         
         return x
     
@@ -107,6 +112,83 @@ class universal_approximator(nn.Module):
         return x
     
     
+    
+class MLP_EncoderDecoder(nn.Module):
+
+    def __init__(self,**kwargs):
+
+        super(MLP_EncoderDecoder, self).__init__()
+
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+        # initialize
+        if self.set_seed:
+            torch.manual_seed(self.seed)
+            
+    
+    def forward(self, X):
+
+        '''
+        X - [d,T], input data
+        '''
+
+        encoder_output = self.encoder(X)
+        Z = encoder_output[-1].T
+        X_pred = self.decoder(Z)
+
+        return encoder_output + [X_pred.T]
+
+class MLP_NonlinearDecoder(nn.Module):
+    
+    '''
+    Here serve the purpose to create the loss for the backpropagation
+    '''
+    
+    def __init__(self,**kwargs):
+        
+        super(MLP_NonlinearDecoder, self).__init__()
+        
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+            
+        # initialize
+        if self.set_seed:
+            torch.manual_seed(self.seed)
+            
+        hidden_layers = []
+        input_dim = self.input_dim
+        for layer in range(self.hidden_layers_number):
+            
+            hidden_layers.append(nn.Linear(input_dim, self.hidden_dim, bias=self.bias))
+            if self.add_bn:
+                hidden_layers.append(nn.BatchNorm1d(self.hidden_dim, 
+                                                    affine=False, 
+                                                    track_running_stats=False))
+            input_dim = self.hidden_dim
+            
+        self.hidden_layers = nn.ModuleList(hidden_layers)
+        self.output_layer = nn.Linear(self.hidden_dim, self.output_dim, bias=self.bias)
+        
+        # create parameter lists
+    
+    def forward(self,I):
+
+        '''
+        I - [d,T], input data
+        '''
+
+        X = I
+        for layer in self.hidden_layers:
+            X = self.default_nonlinearity(layer(X))
+    
+        X = self.output_layer(X)
+
+        return X
+
+
+
+
 # Code below from: https://github.com/HanchenXiong/deep-tsne-embedding
 def Hbeta(D, beta):
     '''

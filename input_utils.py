@@ -141,9 +141,8 @@ class DataGenerator:
         '''
         
         # defaults
-        self.normalization = False
         self.normalize_output = False
-        self.whitening = False
+        self.whiten = False
         self.pca_whitener = None
         self.use_outpt_color = False
         
@@ -164,14 +163,14 @@ class DataGenerator:
         if self.scaler is not None:
             inpt = self.scaler.fit_transform(inpt)
             
-        if self.whitening:
+        if self.whiten:
             if self.pca_whitener is None:
                 self.pca_whitener = PCA(whiten=True, random_state=42)
                 self.pca_whitener.fit_transform(inpt)
             else:
-                inpt = pca_whitener.transform(inpt)
+                inpt = self.pca_whitener.transform(inpt)
             # assert identity covariance
-            assert np.isclose((inpt.T @ inpt) / inpt.shape[0], np.eye(d), atol=1e-1).all()
+#             assert np.isclose((inpt.T @ inpt) / inpt.shape[0], np.eye(d), atol=1e-1).all()
 
         inpt = inpt.T # to obtrain [d,N]
 
