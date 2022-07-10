@@ -5,10 +5,24 @@ from torch import nn
 from IPython.core.debugger import set_trace
 from metric_utils import to_numpy
 
+def initialize_nonlinearities(network, state_dict):
+    for k,v in network.named_parameters():
+        if 'f_s' in k:
+            print(f'f_s from {k} loaded')
+            v.data = state_dict[k].to(v.data.device)
+
+
+
+def init_constant(self, C=1.):
+    for p in self.parameters():
+        nn.init.constant_(p, C)
+    
+def sigmoid(x):
+    return (1./(1+torch.exp(-x))) - 0.5
+
 def init_weights(self):
     for p in self.parameters():
         nn.init.xavier_normal_(p)
-
 
 class dJ_criterion:
     
@@ -57,7 +71,7 @@ class dJ_criterion:
 
 class gained_function(nn.Module):
     
-    def __init__(self, input_dim, function, bias=True):
+    def __init__(self, input_dim, function, bias=True, **kwargs):
         
         super().__init__()
         
@@ -65,10 +79,11 @@ class gained_function(nn.Module):
         self.function = function
         self.bias = bias
         self.input_dim = input_dim
+        self.requires_grad = kwargs['requires_grad']
         
-        self.theta = nn.Parameter(torch.zeros(self.input_dim, 1, requires_grad=True))
+        self.theta = nn.Parameter(torch.zeros(self.input_dim, 1), requires_grad=self.requires_grad)
         if self.bias:
-            self.theta_bias = nn.Parameter(torch.zeros(self.input_dim, 1, requires_grad=True))
+            self.theta_bias = nn.Parameter(torch.zeros(self.input_dim, 1), requires_grad=self.requires_grad)
         else:
             self.theta_bias = 0.
         
@@ -87,16 +102,17 @@ class gained_function(nn.Module):
 
 class universal_approximator(nn.Module):
     
-    def __init__(self, input_dim, hidden_dim=100):
+    def __init__(self, input_dim, hidden_dim=10, **kwargs):
         
         super().__init__()
         
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.requires_grad = kwargs['requires_grad']
         
-        self.theta1 = nn.Parameter(torch.zeros(self.hidden_dim, self.input_dim, requires_grad=True))
-        self.bias1 = nn.Parameter(torch.zeros(self.hidden_dim, self.input_dim, requires_grad=True))
-        self.theta2 = nn.Parameter(torch.zeros(1, self.hidden_dim, requires_grad=True))
+        self.theta1 = nn.Parameter(torch.zeros(self.hidden_dim, self.input_dim), requires_grad=self.requires_grad)
+        self.bias1 = nn.Parameter(torch.zeros(self.hidden_dim, self.input_dim), requires_grad=self.requires_grad)
+        self.theta2 = nn.Parameter(torch.zeros(1, self.hidden_dim), requires_grad=self.requires_grad)
         
         init_weights(self)
         
@@ -111,81 +127,6 @@ class universal_approximator(nn.Module):
         
         return x
     
-    
-    
-class MLP_EncoderDecoder(nn.Module):
-
-    def __init__(self,**kwargs):
-
-        super(MLP_EncoderDecoder, self).__init__()
-
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-        # initialize
-        if self.set_seed:
-            torch.manual_seed(self.seed)
-            
-    
-    def forward(self, X):
-
-        '''
-        X - [d,T], input data
-        '''
-
-        encoder_output = self.encoder(X)
-        Z = encoder_output[-1].T
-        X_pred = self.decoder(Z)
-
-        return encoder_output + [X_pred.T]
-
-class MLP_NonlinearDecoder(nn.Module):
-    
-    '''
-    Here serve the purpose to create the loss for the backpropagation
-    '''
-    
-    def __init__(self,**kwargs):
-        
-        super(MLP_NonlinearDecoder, self).__init__()
-        
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-            
-        # initialize
-        if self.set_seed:
-            torch.manual_seed(self.seed)
-            
-        hidden_layers = []
-        input_dim = self.input_dim
-        for layer in range(self.hidden_layers_number):
-            
-            hidden_layers.append(nn.Linear(input_dim, self.hidden_dim, bias=self.bias))
-            if self.add_bn:
-                hidden_layers.append(nn.BatchNorm1d(self.hidden_dim, 
-                                                    affine=False, 
-                                                    track_running_stats=False))
-            input_dim = self.hidden_dim
-            
-        self.hidden_layers = nn.ModuleList(hidden_layers)
-        self.output_layer = nn.Linear(self.hidden_dim, self.output_dim, bias=self.bias)
-        
-        # create parameter lists
-    
-    def forward(self,I):
-
-        '''
-        I - [d,T], input data
-        '''
-
-        X = I
-        for layer in self.hidden_layers:
-            X = self.default_nonlinearity(layer(X))
-    
-        X = self.output_layer(X)
-
-        return X
-
 
 
 

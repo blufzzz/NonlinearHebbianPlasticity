@@ -1,11 +1,28 @@
+# code from: https://github.com/SKvtun/ParametricUMAP-Pytorch
+
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset
+
 from pynndescent import NNDescent
 from umap.umap_ import fuzzy_simplicial_set, make_epochs_per_sample
 from umap.umap_ import find_ab_params
 import numpy as np
+from IPython.core.debugger import set_trace
 
-class UMAPDataset:
+
+def umap_criterion_compatibility(criterion):
+    
+    '''
+    Model output is a list of activations, 
+    but we need only last item in list for cal
+    '''
+    
+    def wrapper(*args, **kwargs):
+        return criterion(args[0][-1].T)
+    return wrapper
+
+class UMAPDataset(Dataset):
 
     def __init__(self, data, epochs_per_sample, head, tail, weight, device='cpu', batch_size=1000):
 
@@ -13,49 +30,66 @@ class UMAPDataset:
         create dataset for iteration on graph edges
         """
         self.weigh = weight
-        self.batch_size = batch_size
+        self.batch_size = batch_size # number of POINTS in one batch
         self.data = data
         self.device = device
+        
+        assert batch_size%2 == 0
+        assert batch_size > 1
+        assert len(head) == len(tail)
+        
+        if epochs_per_sample is None:
+            epochs_per_sample = np.ones_like(head)
+        
+        self.edge_batch_size = batch_size // 2 # one edge per TWO points
 
-        self.edges_to_exp, self.edges_from_exp = (
-            np.repeat(head, epochs_per_sample.astype("int")),
-            np.repeat(tail, epochs_per_sample.astype("int")),
-        )
+        # repeat according to `epochs_per_sample` rate
+        self.edges_to_exp = np.repeat(head, epochs_per_sample.astype("int"))
+        self.edges_from_exp = np.repeat(tail, epochs_per_sample.astype("int"))
+
+        assert len(self.edges_to_exp) == len(self.edges_from_exp)
+        
         self.num_edges = len(self.edges_to_exp)
 
         # shuffle edges
         shuffle_mask = np.random.permutation(range(len(self.edges_to_exp)))
         self.edges_to_exp = self.edges_to_exp[shuffle_mask]
         self.edges_from_exp = self.edges_from_exp[shuffle_mask]
+        
+        # was `int(self.num_edges / self.batch_size / 5)`
+        self.batches_per_epoch = int(self.num_edges // self.batch_size)
+        
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self.__getitem__(idx)
 
-    def get_batches(self):
-        batches_per_epoch = int(self.num_edges / self.batch_size / 5)
-        for _ in range(batches_per_epoch):
-            rand_index = np.random.randint(0, len(self.edges_to_exp) - 1, size=self.batch_size)
-            batch_index_to = self.edges_to_exp[rand_index]
-            batch_index_from = self.edges_from_exp[rand_index]
-            if self.device == 'cuda':
-                batch_to = torch.Tensor(self.data[batch_index_to]).cuda()
-                batch_from = torch.Tensor(self.data[batch_index_from]).cuda()
-            else:
-                batch_to = torch.Tensor(self.data[batch_index_to])
-                batch_from = torch.Tensor(self.data[batch_index_from])
-            yield (batch_to, batch_from)
-            
-            
-            
-import torch
-import torch.nn as nn
-from pynndescent import NNDescent
-from umap.umap_ import fuzzy_simplicial_set, make_epochs_per_sample
-from umap.umap_ import find_ab_params
-import numpy as np
+    def __getitem__(self, idx):
+        
+        assert idx < len(self)
+        
+        # indexes to choose random batch
+#         rand_index = np.random.randint(0, len(self.edges_to_exp) - 1, size=self.edge_batch_size)
 
+        batch_index_to = self.edges_to_exp[idx:idx+self.edge_batch_size]
+        batch_index_from = self.edges_from_exp[idx:idx+self.edge_batch_size]
+
+        batch_to = torch.Tensor(self.data[batch_index_to]).to(self.device)
+        batch_from = torch.Tensor(self.data[batch_index_from]).to(self.device)
+
+        batch = torch.cat([batch_to, batch_from], dim=0)
+
+        # concatenated (batch_to, batch_from)
+        return batch
+            
+    def __len__(self):
+        return self.batches_per_epoch
+            
+            
 
 class ConstructUMAPGraph:
 
-    def __init__(self, metric='euclidean', n_neighbors=10, batch_size=1000, random_state=42):
-        self.batch_size=batch_size
+    def __init__(self, metric='euclidean', n_neighbors=10, random_state=42):
+        
         self.random_state=random_state
         self.metric=metric # distance metric
         self.n_neighbors=n_neighbors # number of neighbors for computing k-neighbor graph
@@ -114,6 +148,7 @@ class ConstructUMAPGraph:
         return graph, epochs_per_sample, head, tail, weight, n_vertices
 
     def __call__(self, X):
+        
         # number of trees in random projection forest
         n_trees = 5 + int(round((X.shape[0]) ** 0.5 / 20.0))
         # max number of nearest neighbor iters to perform
@@ -143,19 +178,25 @@ class ConstructUMAPGraph:
         )
 
         graph, epochs_per_sample, head, tail, weight, n_vertices = self.get_graph_elements(umap_graph, None)
+        
         return epochs_per_sample, head, tail, weight
 
 
 class UMAPLoss(nn.Module):
 
-    def __init__(self, device='cpu', min_dist=0.1, batch_size=1000, negative_sample_rate=5,
-                 edge_weight=None, repulsion_strength=1.0):
+    def __init__(self, 
+                 device='cpu', 
+                 min_dist=0.1, 
+                 batch_size=1000, 
+                 negative_sample_rate=5,
+                 edge_weight=None, 
+                 repulsion_strength=1.0):
 
         """
         batch_size : int
         size of mini-batches
         negative_sample_rate : int
-          number of negative samples per positive samples to train on
+          number of negative samples PER  each positive sample to train on
         _a : float
           distance parameter in embedding space
         _b : float float
@@ -171,7 +212,6 @@ class UMAPLoss(nn.Module):
         super().__init__()
         self.device = device
         self._a, self._b = find_ab_params(1.0, min_dist)
-        self.batch_size = batch_size
         self.negative_sample_rate = negative_sample_rate
         self.repulsion_strength = repulsion_strength
 
@@ -179,7 +219,11 @@ class UMAPLoss(nn.Module):
     def convert_distance_to_probability(distances, a=1.0, b=1.0):
         return 1.0 / (1.0 + a * distances ** (2. * b))
 
-    def compute_cross_entropy(self, probabilities_graph, probabilities_distance, EPS=1e-4, repulsion_strength=1.0):
+    def compute_cross_entropy(self, 
+                              probabilities_graph, # GT graph
+                              probabilities_distance, # predicted probs
+                              EPS=1e-4, 
+                              repulsion_strength=1.0):
         # cross entropy
         attraction_term = -probabilities_graph * torch.log(
             torch.clamp(probabilities_distance, EPS, 1.0)
@@ -191,7 +235,21 @@ class UMAPLoss(nn.Module):
         CE = attraction_term + repellant_term
         return attraction_term, repellant_term, CE
 
-    def forward(self, embedding_to, embedding_from):
+    def forward(self, embedding, *args, **kwargs):
+        
+        
+        '''
+        embedding - stacked pair of [embedding_to, embedding_from]
+        embedding_to - embedding points that correspond to "heads"
+        embedding_from - embedding points that correspond to "tails"
+        '''
+        
+        N_samples = embedding.shape[0]
+        batch_size = N_samples//2
+
+        embedding_to, embedding_from = embedding[:N_samples//2,...], embedding[N_samples//2:,...]
+        
+        assert embedding_to.shape == embedding_from.shape
         
         device = self.device
         
@@ -223,14 +281,15 @@ class UMAPLoss(nn.Module):
         )
 
         # set true probabilities based on negative sampling
+        # WHY ITS BINARY
         probabilities_graph = torch.cat(
             [
-             torch.ones(self.batch_size, device=device), 
-             torch.zeros(self.batch_size * self.negative_sample_rate, device=device)
+             torch.ones(batch_size, device=device), 
+             torch.zeros(batch_size * self.negative_sample_rate, device=device)
             ],
             dim=0
         )
-
+        
         # compute cross entropy
         (attraction_loss, repellant_loss, ce_loss) = self.compute_cross_entropy(
             probabilities_graph,

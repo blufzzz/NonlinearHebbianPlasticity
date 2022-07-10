@@ -19,17 +19,6 @@ W - [d2, d1]
 |--------|
 '''
 
-def NonlinearGHA(inp, out, W):
-    raise NotImplementedError()
-#             dW = torch.zeros_like(W)
-#             errs = torch.zeros_like(W)
-#             errs[0] = inp
-#             for i in range(d2):
-#                 y_i = w_i @ n
-#                 f_i = f(y_i)
-#                 g_i = torch.autograd.grad(f_i, y_i)
-#                 w_i = W[i]
-#                 dW[i] = 
         
 def oja_rule(inp, out, W):
     d1,T = inp.shape
@@ -99,27 +88,39 @@ def check_nan(*args):
         if torch.isnan(arg).any():
             return True
 
+def get_grad_params(params):
+    return list(filter(lambda x: x.requires_grad, params))
 
 def train(network, 
           opt, 
           criterion,
-          train_params,
-          gata_generator,
-          val_data,
-          criterion_kwargs=None,
-          metric_dict=None
+          criterion_kwargs,
+          parameters,
+          train_dataloader,
+          val_dataloader,
+          metric_dict=None,
+          val_metrics=None,
           ):
     
-    TP = train_params
+    '''
+    Versatile function for training different combinations of models, criteria and learning
+    '''
+    
+    TP = parameters
 
     if metric_dict is None:
         metric_dict = defaultdict(list)
+        
+        
+    if not hasattr(TP, 'maxiter'):
+        TP.maxiter = np.inf
         
     if hasattr(TP, 'val_metrics'):
         val_metrics = TP.val_metrics
     else:
         val_metrics = None
         
+    device = TP.device
     
     enable_grad_train = TP.enable_grad_train if hasattr(TP, 'enable_grad_train') else False
     enable_grad_val = TP.enable_grad_val if hasattr(TP, 'enable_grad_val') else False
@@ -127,58 +128,38 @@ def train(network,
     autograd_context_train = torch.autograd.enable_grad if enable_grad_train else torch.autograd.no_grad
     autograd_context_val = torch.autograd.enable_grad if enable_grad_val else torch.autograd.no_grad
     
-    # val data
-    input_torch_val = val_data['inpt']
-    output_torch_val = val_data['outpt']
-    
-    iterator = tqdm(range(TP.epochs)) if TP.progress_bar else range(TP.epochs)
+    iterator = tqdm(range(TP.epochs), position=0, leave=True) if TP.progress_bar else range(TP.epochs)
     
     # iterate over epoches
-    for i in iterator:
-
-        # train
+    for epoch in iterator:
+        
+        #########
+        # TRAIN #
+        #########
         network.train()
-        data_input, data_output, _ = gata_generator() # ([d_input,T], [d_output,T])
-        random_indexes = np.arange(data_input.shape[1]) # shuffle over time
-        if TP.shuffle:
-            np.random.shuffle(random_indexes)
-        
-        input_torch = torch.tensor(data_input[:,random_indexes], dtype=torch.float).to(TP.device)
-        output_torch = torch.tensor(data_output[:,random_indexes], dtype=torch.float).to(TP.device)
-        
-        # create distriution for T
-        if 'P' in criterion_kwargs['train']: 
-            P_train = compute_joint_probabilities(data_input.T, 
-                                                 perplexity=criterion_kwargs['train']['perplexity'],
-                                                 verbose=0)
-        
-        
-        T = input_torch.shape[1]
-        criterion_train_list = []
+        metric_dict_train = defaultdict(list)
         # iterate over batches
-        for t in range(0,T,TP.batch_size):
+        for itr, input_batch in enumerate(train_dataloader):
+            
+            # early_stopping
+            if itr >= TP.maxiter:
+                break
+            
             with autograd_context_train():
 
                 network.train()
                 
-                # create batches
-                input_torch_batch = input_torch[:,t:t+TP.batch_size]
-                output_torch_batch = output_torch[:,t:t+TP.batch_size]
-                
-                if 'P' in criterion_kwargs['train']: 
-                    criterion_kwargs['train']['P'] = P_train[t:t+TP.batch_size,:][:,t:t+TP.batch_size]
-                
                 # common call for all models
-                output_pred = network.forward(input_torch_batch)
-                if check_nan(*output_pred):
+                input_batch = input_batch.to(device)
+                output_batch = network.forward(input_batch)
+                
+                if check_nan(*output_batch):
                     set_trace()
                 
                 if not criterion_kwargs['skip_train']:
-                    criterion_train = criterion(output_pred[-1], 
-                                                output_torch_batch,
-                                                **criterion_kwargs['train'])
+                    criterion_train = criterion(output_batch, input_batch, **criterion_kwargs['train'])
+                    metric_dict_train['criterion_train'].append(criterion_train.item())
                 
-                    criterion_train_list.append(criterion_train.item())
                 
                 ##################
                 # WEIGHTS UPDATE #
@@ -188,63 +169,72 @@ def train(network,
                     criterion_train.backward()
                     
                     if TP.calculate_grad:
-                        metric_dict['grad_norm'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
-                                                        network.named_parameters())))
+                        metric_dict_train['grad_norm_train'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
+                                                                    network.named_parameters())))
                     
                     if TP.clip_grad_value is not None:
                         nn.utils.clip_grad_norm_(network.parameters(), TP.clip_grad_value)
+                    
                     opt.step()
                     
                 else:
-                    network.hebbian_learning_step(input_torch[:,t:t+TP.batch_size], 
-                                                  output_pred, # list of layer activations
-                                                  output_torch[:,t:t+TP.batch_size],
+                    network.hebbian_learning_step(output_batch, # list of layer activations [L,T,d_k]
+                                                  None, # readout
                                                   learning_type=TP.learning_type,
                                                   learning_rate=TP.lr,
                                                   weight_decay=TP.wd)
                     
-                if TP.weight_saver is not None:
-                     metric_dict['weight'].append(TP.weight_saver(network))
+                
         
         # end of epoch
         ######################################################################################
+        if TP.weight_saver is not None:
+             metric_dict['weights'].append(TP.weight_saver(network))
         
-        if not criterion_kwargs['skip_train']:
-            metric_dict['criterion_train'].append(np.mean(criterion_train_list))
-        
-        
-        # validation
-        with autograd_context_val():
-            
-            network.eval()
-            output_pred_val = network.forward(input_torch_val)
-            
-            if not criterion_kwargs['skip_val']:
-                criterion_val = criterion(output_pred_val[-1], 
-                                          output_torch_val,
-                                          **criterion_kwargs['val'])
+        # saving train per-epoch mean statistics
+        for k,v in metric_dict_train.items():
+            metric_dict[k].append(np.mean(v))
 
-                metric_dict['criterion_val'].append(criterion_val.item())
-                metric_dict['outpt_val'] = output_pred_val
-            
-            
-            # calculate val metrics
-            if val_metrics is not None:
-                for val_metric_name, val_metric in val_metrics.items():
-                    v = val_metric(output_pred_val, output_torch_val)
-                    metric_dict[val_metric_name + '_val'].append(v.item())
-                    
-            if hasattr(TP, 'stopping_criterion') and TP.stopping_criterion is not None:
-                stopping_criterion_val = TP.stopping_criterion(output_pred_val, output_torch_val)
+        ##############
+        # VALIDATION #
+        ##############
         
+        if val_dataloader is None:
+            continue
+            
+        network.eval()
+        metric_dict_val = defaultdict(list)
+        with autograd_context_val():
+            for input_batch in val_dataloader:
+
+                output_batch = network.forward(input_batch)
+
+                if not criterion_kwargs['skip_val']:
+                    criterion_val = criterion(output_batch, input_batch, **criterion_kwargs['val'])
+                    metric_dict_val['criterion_val'].append(criterion_val.item())
+
+                # calculate val metrics
+                if val_metrics is not None:
+                    for val_metric_name, val_metric in val_metrics.items():
+                        v = val_metric(output_batch, input_batch)
+                        metric_dict_val[metric_name + '_val'] = v.item()
+            
+            # saving val per-epoch mean statistics 
+            for k,v in metric_dict_val.items():
+                metric_dict[k].append(np.mean(v))
+
+            if hasattr(TP, 'stopping_criterion') and TP.stopping_criterion is not None:
+                stopping_criterion_val = TP.stopping_criterion(output_batch, input_batch)
+
                 # early stopping
                 assert stopping_criterion_val > -1e-5, '`stopping_criterion_val` must be positive!'
                 if stopping_criterion_val < TP.tol:
+                    print('STOPPING!')
                     break
             else:
                 # no stopping criteria, continue training
                 continue
-                
+
         
     return network, opt, metric_dict
     

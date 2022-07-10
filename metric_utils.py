@@ -48,11 +48,10 @@ def k_th_moment(X, k, μ=0, σ=None):
     return K.mean()
 
 
-
 def cosine_sim(x,y):
     return x@y / (np.linalg.norm(x)*np.linalg.norm(y))
 
-def get_pred_index(metric, index):
+def get_index(metric, index):
     def wrapper(Y_pred, Y_true):
         return metric(Y_pred[index], Y_true)
     return wrapper
@@ -68,30 +67,30 @@ def to_numpy(X):
 
 def r2_score_torch(Y_pred, Y_true):
     '''
-    Y_pred - [d,T]
-    Y_true - [d,T]
+    Y_pred - [T,d]
+    Y_true - [T,d]
     '''
-    assert Y_pred.shape[0] == Y_true.shape[0] == 1
-    return r2_score(to_numpy(Y_true.squeeze(0)), to_numpy(Y_pred.squeeze(0)))
+    assert Y_pred.shape[1] == Y_true.shape[1] == 1
+    return r2_score(to_numpy(Y_true.squeeze(1)), to_numpy(Y_pred.squeeze(1)))
     
     
 def l2_loss(Y_pred, Y_true):
     '''
-    Y_pred - [d,T]
-    Y_true - [d,T]
+    Y_pred - [T,d]
+    Y_true - [T,d]
     '''
-    return torch.pow(torch.norm(Y_pred - Y_true, dim=0), 2).mean()
+    return torch.pow(torch.norm(Y_pred - Y_true, dim=1), 2).mean()
 
 
 def strain(X, Z):
     
     '''
-    X - [d1,T]
-    Z - [d2,T]
+    X - [T,d1]
+    Z - [T,d2]
     d2 < d1
     '''
     
-    return ((Z.T@Z - X.T@X)**2).mean()
+    return ((Z@Z.T - X@X.T)**2).mean()
 
 
 
