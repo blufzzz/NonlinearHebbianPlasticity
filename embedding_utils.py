@@ -1,5 +1,4 @@
 # code from: https://github.com/SKvtun/ParametricUMAP-Pytorch
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
@@ -24,7 +23,8 @@ def umap_criterion_compatibility(criterion):
 
 class UMAPDataset(Dataset):
 
-    def __init__(self, data, epochs_per_sample, head, tail, weight, device='cpu', batch_size=1000):
+    def __init__(self, data, epochs_per_sample, head, tail, weight, device='cpu', batch_size=1000,
+                 use_epoch_per_sample=True):
 
         """
         create dataset for iteration on graph edges
@@ -33,6 +33,7 @@ class UMAPDataset(Dataset):
         self.batch_size = batch_size # number of POINTS in one batch
         self.data = data
         self.device = device
+        self.use_epoch_per_sample = use_epoch_per_sample
         
         assert batch_size%2 == 0
         assert batch_size > 1
@@ -44,8 +45,12 @@ class UMAPDataset(Dataset):
         self.edge_batch_size = batch_size // 2 # one edge per TWO points
 
         # repeat according to `epochs_per_sample` rate
-        self.edges_to_exp = np.repeat(head, epochs_per_sample.astype("int"))
-        self.edges_from_exp = np.repeat(tail, epochs_per_sample.astype("int"))
+        if self.use_epoch_per_sample:
+            self.edges_to_exp = np.repeat(head, epochs_per_sample.astype("int"))
+            self.edges_from_exp = np.repeat(tail, epochs_per_sample.astype("int"))
+        else:
+            self.edges_to_exp = head
+            self.edges_from_exp = tail
 
         assert len(self.edges_to_exp) == len(self.edges_from_exp)
         
@@ -94,8 +99,6 @@ class ConstructUMAPGraph:
         self.metric=metric # distance metric
         self.n_neighbors=n_neighbors # number of neighbors for computing k-neighbor graph
 
-        pass
-
     @staticmethod
     def get_graph_elements(graph_, n_epochs):
 
@@ -128,16 +131,20 @@ class ConstructUMAPGraph:
         graph.sum_duplicates()
         # number of vertices in dataset
         n_vertices = graph.shape[1]
+        
         # get the number of epochs based on the size of the dataset
         if n_epochs is None:
             # For smaller datasets we can use more epochs
-            if graph.shape[0] <= 10000:
+            if graph.shape[0] < 10000:
                 n_epochs = 500
             else:
                 n_epochs = 200
+        
         # remove elements with very low probability
         graph.data[graph.data < (graph.data.max() / float(n_epochs))] = 0.0
+        
         graph.eliminate_zeros()
+        
         # get epochs per sample based upon edge probability
         epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs)
 
@@ -164,11 +171,12 @@ class ConstructUMAPGraph:
             max_candidates=60,
             verbose=True
         )
+        
         # get indices and distances
         knn_indices, knn_dists = nnd.neighbor_graph
 
         # build fuzzy_simplicial_set
-        umap_graph, sigmas, rhos = fuzzy_simplicial_set(
+        umap_graph, _, _ = fuzzy_simplicial_set(
             X=X,
             n_neighbors=self.n_neighbors,
             metric=self.metric,
@@ -178,6 +186,8 @@ class ConstructUMAPGraph:
         )
 
         graph, epochs_per_sample, head, tail, weight, n_vertices = self.get_graph_elements(umap_graph, None)
+        
+        self.graph = graph
         
         return epochs_per_sample, head, tail, weight
 
@@ -203,8 +213,6 @@ class UMAPLoss(nn.Module):
           distance parameter in embedding space
         edge_weights : array
           weights of all edges from sparse UMAP graph
-        parametric_embedding : bool
-          whether the embeddding is parametric or nonparametric
         repulsion_strength : float, optional
           strength of repulsion vs attraction for cross-entropy, by default 1.0
         """
@@ -250,6 +258,8 @@ class UMAPLoss(nn.Module):
         embedding_to, embedding_from = embedding[:N_samples//2,...], embedding[N_samples//2:,...]
         
         assert embedding_to.shape == embedding_from.shape
+        if batch_size < 1e+3:
+            assert self.negative_sample_rate == 0, "Negative samples makes no sense for low batch size!"
         
         device = self.device
         
@@ -259,8 +269,8 @@ class UMAPLoss(nn.Module):
                                                    dim=0)
         
         embedding_neg_from = torch.repeat_interleave(embedding_from, 
-                                             self.negative_sample_rate, 
-                                             dim=0)
+                                                     self.negative_sample_rate, 
+                                                     dim=0)
         
         # random permutation of `embedding_neg_from`
         embedding_neg_from = torch.index_select(embedding_neg_from, 

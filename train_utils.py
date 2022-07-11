@@ -112,7 +112,7 @@ def train(network,
         metric_dict = defaultdict(list)
         
         
-    if not hasattr(TP, 'maxiter'):
+    if not hasattr(TP, 'maxiter') or TP.maxiter is None:
         TP.maxiter = np.inf
         
     if hasattr(TP, 'val_metrics'):
@@ -154,7 +154,7 @@ def train(network,
                 output_batch = network.forward(input_batch)
                 
                 if check_nan(*output_batch):
-                    set_trace()
+                    raise RuntimeError('NaN in `output_batch`!')
                 
                 if not criterion_kwargs['skip_train']:
                     criterion_train = criterion(output_batch, input_batch, **criterion_kwargs['train'])
@@ -164,7 +164,7 @@ def train(network,
                 ##################
                 # WEIGHTS UPDATE #
                 ##################
-                if TP.learning_type=='BP':
+                if opt is not None:
                     opt.zero_grad()
                     criterion_train.backward()
                     
@@ -180,9 +180,7 @@ def train(network,
                 else:
                     network.hebbian_learning_step(output_batch, # list of layer activations [L,T,d_k]
                                                   None, # readout
-                                                  learning_type=TP.learning_type,
-                                                  learning_rate=TP.lr,
-                                                  weight_decay=TP.wd)
+                                                  )
                     
                 
         

@@ -7,6 +7,7 @@ from metric_utils import to_numpy
 from models_utils import init_weights
 from train_utils import *
 
+
 class MLP_NonlinearEncoder(nn.Module):
     
     '''
@@ -64,10 +65,7 @@ class MLP_NonlinearEncoder(nn.Module):
             self.BN_s = nn.ModuleList(BN_s)
         
         init_weights(self)
-        
-# breaking non-singularity of embedding
-#         init_constant(self)
-#         nn.init.xavier_normal_(self.W_out)
+
 
     def create_f(self, input_dim):
         if self.parametrized_f:
@@ -75,52 +73,9 @@ class MLP_NonlinearEncoder(nn.Module):
         else:
             # default
             return self.f_kwargs['function']
-    
-    def hebbian_update(self, W, inp, out, learning_type='Oja', weight_decay=1e-1):
+
         
-        '''
-        inp - [d1,T], layer input 
-        out - [d2,T], layer output
-        W - [d2, d1]
-        |--------|
-        |--w(i)--|
-        |--------|
-        |--------|
-        '''
-        d1,T = inp.shape
-        d2,T = out.shape
-        device = W.device
-        
-        if learning_type=='Oja':
-            # equation (4) for quadratic error
-            # minimizes quadratic representation error $J(W) = ||X - W^Tf(WX)||_2$
-            dW = out@(inp.T - out.T@W)/T # [d2,:]@([:,d1] - [:,d2]@[d2,d1]) 
-            
-        elif learning_type=='Hebb':
-            dW = (out@inp.T)/T - weight_decay*W
-            
-        elif learning_type=='Criterion':
-            # equation (3)
-            I = torch.eye(d1, device=device) 
-            dW = (out@inp.T)@(I - W.T@W)/T # [d2,:]@[:,d1]@([d1,d1] - [d1,d1]) 
-        
-        elif learning_type=='GHA':
-            i_u, j_u = np.triu_indices(d2, k=1)
-            L_out = out@out.T
-            L_out[i_u, j_u] = 0
-            dW = (out@inp.T - (L_out @ W))/T # [d2,:]@([:,d1] - [d2,d2]@[d2,d1])
-            
-        else:
-            raise RuntimeError('Only ["BP", "Hebb", "Oja", "Criterion", "GHA"] rules are supported!')
-                
-        return dW
-        
-    def hebbian_learning_step(self, 
-                              X_s, 
-                              readout=None,
-                              learning_type='Oja', 
-                              learning_rate=1e-1, 
-                              weight_decay=1e-1):
+    def hebbian_learning_step(self, X_s, readout=None):
         
         '''
         X_s: [[d_1,], ..., [d_k,T]] - layer activations
@@ -130,18 +85,23 @@ class MLP_NonlinearEncoder(nn.Module):
         inp = X_s[0] 
         # hebbian update for intermediate layers
         for i, W in enumerate(self.W_s, start=1):
+            
             out = X_s[i]
             
-            dW = self.hebbian_update(W.data, inp, out, learning_type=learning_type, weight_decay=weight_decay)
-            W.data = W.data + learning_rate*dW
-#             W.data = W.data / torch.norm(W.data, dim=1, keepdim=True)
+            dW = self.hebbian_update(inp, out, W.data)
+            W.data = W.data + self.lr_hebb*dW
+            
+            if self.normalize_hebbian_update:
+                # helps to avoid weight explosion
+                W.data = W.data / torch.norm(W.data, dim=1, keepdim=True)
+            
             inp = out
             
         if self.add_readout:
             # delta-rule update for the readout layer
             delta = readout - X_s[-1]  # [1,T]
             dW_out = delta@inp.T
-            self.W_out.data = self.W_out.data + learning_rate*dW_out
+            self.W_out.data = self.W_out.data + self.lr*dW_out
         
     def forward(self,X):
         
@@ -159,14 +119,14 @@ class MLP_NonlinearEncoder(nn.Module):
                 # transpose to [T,d] for BS layer and back to [d,T]
                 X = self.BN_s[i](X.T).T 
             
-            X = self.f_s[i](W@X) # [d,T]
-            
             if self.inplace_update:
-#                     self.W_2 = self.W_2 + self.λ*dW2
-#         # updated pass
-#         Y2 = self.f_2(self.W_2@Y1)
+                Y = self.f_s[i](W@X)
+                dW = self.hebbian_update(X, Y, W)
+                X = self.f_s[i]((W + self.lr_hebb*dW)@X) 
+            else:
+                X = self.f_s[i](W@X) # [d,T]
 
-            X_s.append(X)
+            X_s.append(X) 
             
         # single ouput readout
         if self.add_readout:
@@ -175,78 +135,3 @@ class MLP_NonlinearEncoder(nn.Module):
 
         return X_s
 
-
-
-
-class MLP_EncoderDecoder(nn.Module):
-
-    def __init__(self,**kwargs):
-
-        super(MLP_EncoderDecoder, self).__init__()
-
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-        # initialize
-        if self.set_seed:
-            torch.manual_seed(self.seed)
-            
-    
-    def forward(self, X):
-
-        '''
-        X - [d,T], input data
-        '''
-
-        encoder_output = self.encoder(X)
-        Z = encoder_output[-1].T
-        X_pred = self.decoder(Z)
-
-        return encoder_output + [X_pred.T]
-
-class MLP_NonlinearDecoder(nn.Module):
-    
-    '''
-    Here serve the purpose to create the loss for the backpropagation
-    '''
-    
-    def __init__(self,**kwargs):
-        
-        super(MLP_NonlinearDecoder, self).__init__()
-        
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-            
-        # initialize
-        if self.set_seed:
-            torch.manual_seed(self.seed)
-            
-        hidden_layers = []
-        input_dim = self.input_dim
-        for layer in range(self.hidden_layers_number):
-            
-            hidden_layers.append(nn.Linear(input_dim, self.hidden_dim, bias=self.bias))
-            if self.add_bn:
-                hidden_layers.append(nn.BatchNorm1d(self.hidden_dim, 
-                                                    affine=False, 
-                                                    track_running_stats=False))
-            input_dim = self.hidden_dim
-            
-        self.hidden_layers = nn.ModuleList(hidden_layers)
-        self.output_layer = nn.Linear(self.hidden_dim, self.output_dim, bias=self.bias)
-        
-        # create parameter lists
-    
-    def forward(self,I):
-
-        '''
-        I - [d,T], input data
-        '''
-
-        X = I
-        for layer in self.hidden_layers:
-            X = self.default_nonlinearity(layer(X))
-    
-        X = self.output_layer(X)
-
-        return X
