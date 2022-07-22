@@ -5,7 +5,6 @@ from torch import nn
 from collections import defaultdict
 from IPython.core.debugger import set_trace
 
-
 from input_utils import *
 from metric_utils import *
 
@@ -19,7 +18,64 @@ W - [d2, d1]
 |--------|
 '''
 
-        
+def g_krotov(tot_input, k=2, delta=0.4):
+    
+    '''
+    Implicit WTA
+    most active - get activation 1
+    k-th active - get -delta
+    others - 0
+    '''
+    
+    h, batch_size = tot_input.shape
+    
+    # applying activation
+    y = torch.argsort(tot_input, dim=0)
+    yl = torch.zeros((h, batch_size), dtype=tot_input.dtype, device=tot_input.device) # [h,T]
+
+    batch_arange = torch.arange(batch_size, device=tot_input.device)
+    yl[y[h-1,:], batch_arange] = 1.0 # the  before-last neuron takes it all
+    yl[y[h-k], batch_arange] = -delta # the k-th from the end 
+    
+    return yl
+
+
+def krotov_rule_linear(inpt, outpt, W):
+    
+    # WTA
+    Wv = W@inpt
+    yl = g_krotov(outpt)
+    
+    xx=(yl*Wv).sum(1) # sum over batch, get [h,]
+    dW = yl@inpt.T - xx.unsqueeze(1)*W
+    
+    return dW
+
+
+def krotov_rule(inpt, outpt, W):
+    
+    h, batch_size = outpt.shape
+    d = inpt.shape[0]
+    
+    # WTA
+    Wv = W@inpt
+    yl = g_krotov(outpt)
+    
+    xx=(yl*outpt).sum(1) # sum over batch, get [h,]
+    dW = yl@inpt.T - xx.unsqueeze(1)*W
+    
+    return dW
+      
+    
+def oja_rule_linear(inp, out, W):
+    d1,T = inp.shape
+    Wv = W@inp
+    # equation (4) for quadratic error
+    # minimizes quadratic representation error $J(W) = ||X - W^Tf(WX)||_2$
+    dW = out@(inp.T - Wv.T@W)/T # [d2,:]@([:,d1] - [:,d2]@[d2,d1]) 
+    return dW
+    
+    
 def oja_rule(inp, out, W):
     d1,T = inp.shape
     # equation (4) for quadratic error
@@ -31,6 +87,7 @@ def hebb_rule(inp, out, W, weight_decay=0):
     d1,T = inp.shape
     dW = (out@inp.T)/T - weight_decay*W
     return dW
+
 
 def criterion_rule(inp, out, W):
     # equation (3)
@@ -44,6 +101,7 @@ def criterion_rule(inp, out, W):
         
     dW = (out@inp.T)@(I - W.T@W)/T # [d2,:]@[:,d1]@([d1,d1] - [d1,d1]) 
     return dW
+
 
 def GHA_rule(inp, out, W):
     d1,T = inp.shape
@@ -84,9 +142,23 @@ def bruteforce_projection(n_grid_samples, criterion, X, f=None, w_min=-1.5, w_ma
 
 
 def check_nan(*args):
+    '''
+    input - lists of lists of tensor
+    '''
+    out = False
     for arg in args:
-        if torch.isnan(arg).any():
-            return True
+        if isinstance(arg, torch.Tensor):
+            if torch.isnan(arg).any():
+                out = True
+                break
+        elif isinstance(arg, list):
+            out = check_nan(*arg)
+        else:
+            pass
+            
+    return out
+
+            
 
 def get_grad_params(params):
     return list(filter(lambda x: x.requires_grad, params))
@@ -110,7 +182,6 @@ def train(network,
 
     if metric_dict is None:
         metric_dict = defaultdict(list)
-        
         
     if not hasattr(TP, 'maxiter') or TP.maxiter is None:
         TP.maxiter = np.inf
@@ -153,7 +224,7 @@ def train(network,
                 input_batch = input_batch.to(device)
                 output_batch = network.forward(input_batch)
                 
-                if check_nan(*output_batch):
+                if check_nan(*output_batch[0]):
                     raise RuntimeError('NaN in `output_batch`!')
                 
                 if not criterion_kwargs['skip_train']:
@@ -164,7 +235,7 @@ def train(network,
                 ##################
                 # WEIGHTS UPDATE #
                 ##################
-                if opt is not None:
+                if TP.backprop_learning:
                     opt.zero_grad()
                     criterion_train.backward()
                     
@@ -177,10 +248,9 @@ def train(network,
                     
                     opt.step()
                     
-                else:
-                    network.hebbian_learning_step(output_batch, # list of layer activations [L,T,d_k]
-                                                  None, # readout
-                                                  )
+                if TP.hebbian_learning:
+                    # tuple: (list of layer's outputs, final output)
+                    network.hebbian_learning_step(*output_batch, readout=None)
                     
                 
         
