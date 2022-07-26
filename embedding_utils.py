@@ -14,7 +14,11 @@ def umap_criterion_compatibility(criterion):
     
     '''
     Model output is a list of activations, 
-    but we need only last item in list for cal
+    but we need only last item in list for 
+    
+    `criterion(output_batch, input_batch, **criterion_kwargs['train'])`
+    
+    taking last item from `output_batch` and transpose it
     '''
     
     def wrapper(*args, **kwargs):
@@ -24,7 +28,7 @@ def umap_criterion_compatibility(criterion):
 class UMAPDataset(Dataset):
 
     def __init__(self, data, epochs_per_sample, head, tail, weight, device='cpu', batch_size=1000,
-                 use_epoch_per_sample=True):
+                 use_epoch_per_sample=True, shuffle=True):
 
         """
         create dataset for iteration on graph edges
@@ -57,9 +61,10 @@ class UMAPDataset(Dataset):
         self.num_edges = len(self.edges_to_exp)
 
         # shuffle edges
-        shuffle_mask = np.random.permutation(range(len(self.edges_to_exp)))
-        self.edges_to_exp = self.edges_to_exp[shuffle_mask]
-        self.edges_from_exp = self.edges_from_exp[shuffle_mask]
+        if shuffle:
+            shuffle_mask = np.random.permutation(range(len(self.edges_to_exp)))
+            self.edges_to_exp = self.edges_to_exp[shuffle_mask]
+            self.edges_from_exp = self.edges_from_exp[shuffle_mask]
         
         # was `int(self.num_edges / self.batch_size / 5)`
         self.batches_per_epoch = int(self.num_edges // self.batch_size)

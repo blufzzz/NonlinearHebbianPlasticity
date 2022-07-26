@@ -6,6 +6,7 @@ from IPython.core.debugger import set_trace
 from metric_utils import to_numpy
 from models_utils import init_weights
 from train_utils import *
+import higher
 
 
 class MLP_NonlinearEncoder(nn.Module):
@@ -71,8 +72,10 @@ class MLP_NonlinearEncoder(nn.Module):
         
         # create parameter lists
         self.W_s = nn.ParameterList(self.W_s)
+        
         if self.parametrized_f:
             self.f_s = nn.ModuleList(self.f_s)
+            
             if self.add_recurrent_nonlinearity:
                 self.f_s_r = nn.ModuleList(self.f_s_r)
         
@@ -92,7 +95,30 @@ class MLP_NonlinearEncoder(nn.Module):
             return self.nonlinearity(input_dim, **self.f_kwargs)
         else:
             return self.nonlinearity
-        
+    
+    
+    def hebbian_learning_step_layer(self, layer_outputs, layer_number):
+    
+        X, Y, Y_f, Y_fr, Y_frf = layer_outputs[layer_number]
+        batch_size = X.shape[1]
+
+        if self.add_recurrent_connections:
+            dW = self.hebbian_update(X, Y_fr, self.W_s[layer_number])
+
+            # anti-hebbian update
+            self.W_r_s[layer_number].data += self.lr_hebb*(-1.0*Y_frf@Y_frf.T)/batch_size
+
+        else:
+#             set_trace()
+            dW = self.hebbian_update(X, Y_f, self.W_s[layer_number])
+
+        self.W_s[layer_number].data += self.lr_hebb*dW
+
+        if self.normalize_hebbian_update:
+            # helps to avoid weight explosion
+            self.W_s[layer_number] /= torch.norm(self.W_s[layer_number], dim=1, keepdim=True)
+            if self.add_recurrent_connections:
+                self.W_r_s[layer_number] /= torch.norm(self.W_r_s[layer_number], dim=1, keepdim=True)
         
     def hebbian_learning_step(self, layer_outputs, out, readout=None):
         
@@ -106,25 +132,7 @@ class MLP_NonlinearEncoder(nn.Module):
          
         # hebbian update for intermediate layers
         for layer_number in range(self.layers_number):
-            
-            X, Y, Y_f, Y_fr, Y_frf = layer_outputs[layer_number]
-            batch_size = X.shape[1]
-            
-            if self.add_recurrent_connections:
-                dW = self.hebbian_update(X, Y_fr, self.W_s[layer_number])
-                
-                # anti-hebbian update
-                self.W_r_s[layer_number] += self.lr_hebb*(-1.0*Y_frf@Y_frf.T)/batch_size
-            
-            else:
-                dW = self.hebbian_update(X, Y_f, self.W_s[layer_number])
-                self.W_s[layer_number] += self.lr_hebb*dW
-            
-            if self.normalize_hebbian_update:
-                # helps to avoid weight explosion
-                self.W_s[layer_number] /= torch.norm(self.W_s[layer_number], dim=1, keepdim=True)
-                if self.add_recurrent_connections:
-                    self.W_r_s[layer_number] /= torch.norm(self.W_r_s[layer_number], dim=1, keepdim=True)
+            self.hebbian_learning_step_layer(layer_outputs, layer_number)
             
         if self.add_readout:
             # delta-rule update for the readout layer
@@ -161,10 +169,6 @@ class MLP_NonlinearEncoder(nn.Module):
                 Y_frf = self.f_s_r[layer_number](Y_fr)
                 
         return [X, Y, Y_f, Y_fr, Y_frf]
-    
-    def hebbian_update(self, ):
-        
-        return self.hebbian_update_fun()
         
     def forward(self,X):
         
@@ -180,16 +184,17 @@ class MLP_NonlinearEncoder(nn.Module):
             
             layer_output = self.single_layer_forward(X, layer_number)
             # activation to pass to the next layer
-            X = layer_output[-1] if self.add_recurrent_connections else layer_output[1]
+            # layer_output: [X, Y, Y_f, Y_fr, Y_frf]
+            X = layer_output[-1] if self.add_recurrent_connections else layer_output[2]
             
             if self.inplace_update:
-                  raise NotImplementedError  
-                    
-#                 layer_output = self.single_layer_forward(X, layer_number)
-#                 X = layer_output[-1] if self.add_recurrent_connections else layer_output[1]
-#                 # do the update based on current layer `inpt`-`outpt`
-#                 dW = self.hebbian_update(, self.W_s[layer_number])
-#                 dW_r = self.antihebb()
+#                   raise NotImplementedError  
+                # given existing output - update in a differentiable way
+                self.hebbian_learning_step_layer(layer_output, layer_number)
+                # create new output, given update
+                layer_output = self.single_layer_forward(X, layer_number)
+                # layer_output: [X, Y, Y_f, Y_fr, Y_frf]
+                X = layer_output[-1] if self.add_recurrent_connections else layer_output[2]
 
             layer_outputs.append(layer_output)
             

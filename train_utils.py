@@ -240,8 +240,7 @@ def train(network,
                     criterion_train.backward()
                     
                     if TP.calculate_grad:
-                        metric_dict_train['grad_norm_train'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
-                                                                    network.named_parameters())))
+                        metric_dict_train['grad_norm_train'].append(calc_gradient_norm(get_grad_params(network.parameters())))
                     
                     if TP.clip_grad_value is not None:
                         nn.utils.clip_grad_norm_(network.parameters(), TP.clip_grad_value)
@@ -327,10 +326,13 @@ def get_capacity(model):
     return round(s_total,2)
 
 
-def calc_gradient_norm(named_parameters):
+def calc_gradient_norm(parameters):
     total_norm = 0.0
-    for name, p in named_parameters:
-        param_norm = p.grad.data.norm(2)
+    for i,p in enumerate(parameters):
+        try:
+            param_norm = p.grad.data.norm(2)
+        except:
+            set_trace()
         total_norm += param_norm.item()
     total_norm = total_norm 
     return np.mean(total_norm)
